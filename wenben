@@ -1,0 +1,210 @@
+import re
+import pandas as pd
+import streamlit as st
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+
+# 初始化会话状态
+if 'data_list' not in st.session_state:
+    st.session_state.data_list = []
+if 'input_text' not in st.session_state:
+    st.session_state.input_text = ""
+
+def extract_info(text):
+    """
+    从文本中提取关键信息：
+    1. 全字段支持中文冒号「：」、英文冒号「:」
+    2. 身份证：身份证 / 身份证号码
+    3. 手机号：手机号 → 电话号码 → 手机 → 电话 → 手机号码（新增）
+    4. 价格：价格 → 初始价格 → 初始价
+    5. 保留备注完整，支持单条删除
+    """
+    result = {
+        '姓名': '',
+        '身份证号': '',
+        '手机号': '',
+        '名称': '',
+        '价格': '',
+        '备注': ''
+    }
+    
+    original_text = text.strip()
+    lines = [line.strip() for line in original_text.split('\n') if line.strip()]
+    extracted_lines = []
+
+    # 1. 姓名
+    name_pattern = re.compile(r'^姓名[：:].*', re.M)
+    for i, line in enumerate(lines):
+        if re.match(name_pattern, line):
+            name_match = re.search(r'姓名[：:]([^\n]+)', line)
+            if name_match:
+                result['姓名'] = name_match.group(1).strip()
+                extracted_lines.append(i)
+            break
+
+    # 2. 身份证
+    id_card_patterns = [
+        re.compile(r'^身份证号码[：:].*', re.M),
+        re.compile(r'^身份证[：:].*', re.M)
+    ]
+    id_card_extracted = False
+    for pattern in id_card_patterns:
+        if id_card_extracted:
+            break
+        for i, line in enumerate(lines):
+            if re.match(pattern, line):
+                id_card_match = re.search(r'([\dXx]{18})', line)
+                if id_card_match:
+                    result['身份证号'] = id_card_match.group(1).strip()
+                    extracted_lines.append(i)
+                    id_card_extracted = True
+                break
+
+    # 3. 手机号（最后新增：手机号码）
+    phone_patterns = [
+        re.compile(r'^手机号[：:].*', re.M),
+        re.compile(r'^电话号码[：:].*', re.M),
+        re.compile(r'^手机[：:].*', re.M),
+        re.compile(r'^电话[：:].*', re.M),
+        re.compile(r'^手机号码[：:].*', re.M)  # <--- 这里新增
+    ]
+    phone_extracted = False
+    for pattern in phone_patterns:
+        if phone_extracted:
+            break
+        for i, line in enumerate(lines):
+            if re.match(pattern, line):
+                phone_match = re.search(r'(\d{11})', line)
+                if phone_match:
+                    result['手机号'] = phone_match.group(1).strip()
+                    extracted_lines.append(i)
+                    phone_extracted = True
+                break
+
+    # 4. 名称
+    name_product_pattern = re.compile(r'^名称[：:].*', re.M)
+    for i, line in enumerate(lines):
+        if re.match(name_product_pattern, line):
+            name_product_match = re.search(r'名称[：:]([^\n]+)', line)
+            if name_product_match:
+                result['名称'] = name_product_match.group(1).strip()
+                extracted_lines.append(i)
+            break
+
+    # 5. 价格
+    price_extracted = False
+    price_pattern = re.compile(r'^价格[：:].*', re.M)
+    for i, line in enumerate(lines):
+        if re.match(price_pattern, line):
+            price_match = re.search(r'价格[：:]([^\n]+)', line)
+            if price_match:
+                price_text = price_match.group(1).strip()
+                pure_price = re.search(r'(\d+\.?\d*)', price_text)
+                if pure_price:
+                    result['价格'] = pure_price.group(1)
+                    price_extracted = True
+                extracted_lines.append(i)
+            break
+    
+    if not price_extracted:
+        initial_price_match = re.search(r'初始价格[：:]([^\n]+)', original_text)
+        if initial_price_match:
+            initial_price_text = initial_price_match.group(1).strip()
+            pure_initial_price = re.search(r'(\d+\.?\d*)', initial_price_text)
+            if pure_initial_price:
+                result['价格'] = pure_initial_price.group(1)
+        else:
+            initial_price_short_match = re.search(r'初始价[：:]([^\n]+)', original_text)
+            if initial_price_short_match:
+                initial_price_short_text = initial_price_short_match.group(1).strip()
+                pure_initial_price_short = re.search(r'(\d+\.?\d*)', initial_price_short_text)
+                if pure_initial_price_short:
+                    result['价格'] = pure_initial_price_short.group(1)
+
+    # 备注
+    remaining_lines = [lines[i] for i in range(len(lines)) if i not in extracted_lines]
+    result['备注'] = '\n'.join(remaining_lines)
+    
+    return result
+
+def generate_excel_with_column_width(df, column_width=20):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "信息提取结果"
+    for r in dataframe_to_rows(df, index=False, header=True):
+        ws.append(r)
+    for column in ws.columns:
+        column_letter = column[0].column_letter
+        ws.column_dimensions[column_letter].width = column_width
+    import io
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+# 删除单条数据
+def delete_single_data(index):
+    if 0 <= index < len(st.session_state.data_list):
+        del st.session_state.data_list[index]
+        st.success(f'第{index+1}条数据已删除')
+
+def main():
+    st.title('文本信息提取工具')
+    st.markdown('---')
+    
+    st.session_state.input_text = st.text_area(
+        '请输入需要提取信息的文本',
+        value=st.session_state.input_text,
+        height=300,
+        placeholder='请输入文本'
+    )
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button('提取信息并添加到表格', type='primary'):
+            if not st.session_state.input_text.strip():
+                st.warning('请输入文本')
+            else:
+                info = extract_info(st.session_state.input_text)
+                st.session_state.data_list.append(info)
+                st.success('添加成功')
+    
+    with col2:
+        if st.button('清空填写文本', type='secondary'):
+            st.session_state.input_text = ""
+
+    if st.button('清空所有表格数据', type='secondary'):
+        st.session_state.data_list = []
+        st.warning('已清空所有数据')
+
+    st.markdown('---')
+
+    if st.session_state.data_list:
+        st.subheader('提取结果')
+        df = pd.DataFrame(st.session_state.data_list).reset_index(drop=True)
+
+        for idx in range(len(df)):
+            data_cols = st.columns(len(df.columns))
+            btn_col = st.columns(1)
+
+            for col_idx, col_name in enumerate(df.columns):
+                with data_cols[col_idx]:
+                    if col_name == '备注' and df.iloc[idx][col_name]:
+                        st.write(f'**{col_name}：**\n{df.iloc[idx][col_name]}')
+                    else:
+                        st.write(f'**{col_name}：** {df.iloc[idx][col_name] if df.iloc[idx][col_name] else "-"}')
+
+            with btn_col[0]:
+                if st.button(f'删除第{idx+1}条', key=f'delete_{idx}'):
+                    delete_single_data(idx)
+                    st.rerun()
+            st.markdown('---')
+
+        raw_df = pd.DataFrame(st.session_state.data_list)
+        excel_data = generate_excel_with_column_width(raw_df)
+        st.download_button('下载Excel表格', excel_data, '信息提取结果.xlsx', type='primary')
+    else:
+        st.info('暂无提取数据')
+
+if __name__ == '__main__':
+    main()
